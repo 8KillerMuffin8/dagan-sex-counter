@@ -105,6 +105,11 @@ export default function LiveTimer({
   const [elapsed, setElapsed] = useState<ElapsedTime | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
 
+  // Sync when initialLatest prop changes
+  useEffect(() => {
+    setLatestEvent(initialLatest);
+  }, [initialLatest]);
+
   // Real-time ticking every second
   useEffect(() => {
     if (!latestEvent) return;

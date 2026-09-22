@@ -1,6 +1,4 @@
-import postgres from "postgres";
-import { drizzle } from "drizzle-orm/postgres-js";
-import * as schema from "./schema";
+import { neon } from "@neondatabase/serverless";
 import fs from "fs";
 import path from "path";
 
@@ -24,24 +22,16 @@ export interface NewSexEvent {
   ipHash?: string | null;
 }
 
-const DATABASE_URL = process.env.DATABASE_URL;
+// Detect connection string from standard Vercel & Neon env vars
+const connectionString =
+  process.env.POSTGRES_URL ||
+  process.env.DATABASE_URL ||
+  process.env.POSTGRES_PRISMA_URL ||
+  process.env.POSTGRES_URL_NON_POOLING;
 
-let sql: ReturnType<typeof postgres> | null = null;
-let db: ReturnType<typeof drizzle> | null = null;
+const neonSql = connectionString ? neon(connectionString) : null;
 
-if (DATABASE_URL) {
-  try {
-    sql = postgres(DATABASE_URL, {
-      ssl: process.env.NODE_ENV === "production" ? "require" : false,
-      max: 10,
-    });
-    db = drizzle(sql, { schema });
-  } catch (err) {
-    console.warn("Failed to initialize Postgres client, falling back to local file storage:", err);
-  }
-}
-
-// Local file storage fallback
+// Local file storage fallback for offline / local testing without Postgres
 const LOCAL_DB_PATH = path.join(process.cwd(), ".local-db.json");
 
 function readLocalDb(): SexEvent[] {
@@ -65,12 +55,13 @@ function writeLocalDb(events: SexEvent[]): void {
   }
 }
 
-// Initialize tables if on PostgreSQL
+// Initialize tables if on PostgreSQL / Neon
 let isInitialized = false;
-async function ensureTables() {
-  if (!sql || isInitialized) return;
+export async function ensureTables() {
+  if (!neonSql || isInitialized) return;
   try {
-    await sql`
+    // Run separate statements (Postgres prepared statements require individual commands)
+    await neonSql`
       CREATE TABLE IF NOT EXISTS events (
         id SERIAL PRIMARY KEY,
         timestamp TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
@@ -80,48 +71,50 @@ async function ensureTables() {
         notes TEXT,
         ip_hash VARCHAR(64),
         created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
-      );
-      CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp DESC);
+      )
     `;
+
+    await neonSql`
+      CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp DESC)
+    `;
+
     isInitialized = true;
+    console.log("Postgres tables verified successfully.");
   } catch (err) {
     console.error("Error ensuring Postgres tables exist:", err);
+    throw err;
   }
 }
 
 export async function getLatestEvent(): Promise<SexEvent | null> {
-  if (sql) {
+  if (neonSql) {
     await ensureTables();
-    try {
-      const rows = await sql`
-        SELECT 
-          id,
-          timestamp,
-          duration_minutes as "durationMinutes",
-          duration_category as "durationCategory",
-          location,
-          notes,
-          ip_hash as "ipHash",
-          created_at as "createdAt"
-        FROM events 
-        ORDER BY timestamp DESC 
-        LIMIT 1
-      `;
-      if (rows.length === 0) return null;
-      const row = rows[0];
-      return {
-        id: row.id,
-        timestamp: new Date(row.timestamp).toISOString(),
-        durationMinutes: row.durationMinutes,
-        durationCategory: row.durationCategory,
-        location: row.location,
-        notes: row.notes,
-        ipHash: row.ipHash,
-        createdAt: new Date(row.createdAt).toISOString(),
-      };
-    } catch (err) {
-      console.error("Error querying latest event from Postgres:", err);
-    }
+    const rows = await neonSql`
+      SELECT 
+        id,
+        timestamp,
+        duration_minutes as "durationMinutes",
+        duration_category as "durationCategory",
+        location,
+        notes,
+        ip_hash as "ipHash",
+        created_at as "createdAt"
+      FROM events 
+      ORDER BY timestamp DESC 
+      LIMIT 1
+    `;
+    if (rows.length === 0) return null;
+    const row = rows[0] as Record<string, unknown>;
+    return {
+      id: Number(row.id),
+      timestamp: new Date(String(row.timestamp)).toISOString(),
+      durationMinutes: row.durationMinutes !== null ? Number(row.durationMinutes) : null,
+      durationCategory: row.durationCategory ? String(row.durationCategory) : null,
+      location: row.location ? String(row.location) : null,
+      notes: row.notes ? String(row.notes) : null,
+      ipHash: row.ipHash ? String(row.ipHash) : null,
+      createdAt: new Date(String(row.createdAt)).toISOString(),
+    };
   }
 
   const localEvents = readLocalDb();
@@ -131,35 +124,34 @@ export async function getLatestEvent(): Promise<SexEvent | null> {
 }
 
 export async function getAllEvents(): Promise<SexEvent[]> {
-  if (sql) {
+  if (neonSql) {
     await ensureTables();
-    try {
-      const rows = await sql`
-        SELECT 
-          id,
-          timestamp,
-          duration_minutes as "durationMinutes",
-          duration_category as "durationCategory",
-          location,
-          notes,
-          ip_hash as "ipHash",
-          created_at as "createdAt"
-        FROM events 
-        ORDER BY timestamp DESC
-      `;
-      return rows.map((row) => ({
-        id: row.id,
-        timestamp: new Date(row.timestamp).toISOString(),
-        durationMinutes: row.durationMinutes,
-        durationCategory: row.durationCategory,
-        location: row.location,
-        notes: row.notes,
-        ipHash: row.ipHash,
-        createdAt: new Date(row.createdAt).toISOString(),
-      }));
-    } catch (err) {
-      console.error("Error querying all events from Postgres:", err);
-    }
+    const rows = await neonSql`
+      SELECT 
+        id,
+        timestamp,
+        duration_minutes as "durationMinutes",
+        duration_category as "durationCategory",
+        location,
+        notes,
+        ip_hash as "ipHash",
+        created_at as "createdAt"
+      FROM events 
+      ORDER BY timestamp DESC
+    `;
+    return rows.map((rowRecord) => {
+      const row = rowRecord as Record<string, unknown>;
+      return {
+        id: Number(row.id),
+        timestamp: new Date(String(row.timestamp)).toISOString(),
+        durationMinutes: row.durationMinutes !== null ? Number(row.durationMinutes) : null,
+        durationCategory: row.durationCategory ? String(row.durationCategory) : null,
+        location: row.location ? String(row.location) : null,
+        notes: row.notes ? String(row.notes) : null,
+        ipHash: row.ipHash ? String(row.ipHash) : null,
+        createdAt: new Date(String(row.createdAt)).toISOString(),
+      };
+    });
   }
 
   const localEvents = readLocalDb();
@@ -170,49 +162,45 @@ export async function getAllEvents(): Promise<SexEvent[]> {
 export async function createEvent(data: NewSexEvent): Promise<SexEvent> {
   const ts = data.timestamp instanceof Date ? data.timestamp : new Date(data.timestamp);
 
-  if (sql) {
+  if (neonSql) {
     await ensureTables();
-    try {
-      const rows = await sql`
-        INSERT INTO events (
-          timestamp,
-          duration_minutes,
-          duration_category,
-          location,
-          notes,
-          ip_hash
-        ) VALUES (
-          ${ts.toISOString()},
-          ${data.durationMinutes ?? null},
-          ${data.durationCategory ?? null},
-          ${data.location ?? null},
-          ${data.notes ?? null},
-          ${data.ipHash ?? null}
-        )
-        RETURNING 
-          id,
-          timestamp,
-          duration_minutes as "durationMinutes",
-          duration_category as "durationCategory",
-          location,
-          notes,
-          ip_hash as "ipHash",
-          created_at as "createdAt"
-      `;
-      const row = rows[0];
-      return {
-        id: row.id,
-        timestamp: new Date(row.timestamp).toISOString(),
-        durationMinutes: row.durationMinutes,
-        durationCategory: row.durationCategory,
-        location: row.location,
-        notes: row.notes,
-        ipHash: row.ipHash,
-        createdAt: new Date(row.createdAt).toISOString(),
-      };
-    } catch (err) {
-      console.error("Error creating event in Postgres:", err);
-    }
+    const rows = await neonSql`
+      INSERT INTO events (
+        timestamp,
+        duration_minutes,
+        duration_category,
+        location,
+        notes,
+        ip_hash
+      ) VALUES (
+        ${ts.toISOString()},
+        ${data.durationMinutes ?? null},
+        ${data.durationCategory ?? null},
+        ${data.location ?? null},
+        ${data.notes ?? null},
+        ${data.ipHash ?? null}
+      )
+      RETURNING 
+        id,
+        timestamp,
+        duration_minutes as "durationMinutes",
+        duration_category as "durationCategory",
+        location,
+        notes,
+        ip_hash as "ipHash",
+        created_at as "createdAt"
+    `;
+    const row = rows[0] as Record<string, unknown>;
+    return {
+      id: Number(row.id),
+      timestamp: new Date(String(row.timestamp)).toISOString(),
+      durationMinutes: row.durationMinutes !== null ? Number(row.durationMinutes) : null,
+      durationCategory: row.durationCategory ? String(row.durationCategory) : null,
+      location: row.location ? String(row.location) : null,
+      notes: row.notes ? String(row.notes) : null,
+      ipHash: row.ipHash ? String(row.ipHash) : null,
+      createdAt: new Date(String(row.createdAt)).toISOString(),
+    };
   }
 
   const localEvents = readLocalDb();
@@ -235,23 +223,20 @@ export async function createEvent(data: NewSexEvent): Promise<SexEvent> {
 export async function getLastEventByIpHash(ipHash: string): Promise<Date | null> {
   if (!ipHash) return null;
 
-  if (sql) {
+  if (neonSql) {
     await ensureTables();
-    try {
-      const rows = await sql`
-        SELECT created_at
-        FROM events
-        WHERE ip_hash = ${ipHash}
-        ORDER BY created_at DESC
-        LIMIT 1
-      `;
-      if (rows.length > 0) {
-        return new Date(rows[0].created_at);
-      }
-      return null;
-    } catch (err) {
-      console.error("Error querying last event by ip hash:", err);
+    const rows = await neonSql`
+      SELECT created_at as "createdAt"
+      FROM events
+      WHERE ip_hash = ${ipHash}
+      ORDER BY created_at DESC
+      LIMIT 1
+    `;
+    if (rows.length > 0) {
+      const row = rows[0] as Record<string, unknown>;
+      return new Date(String(row.createdAt));
     }
+    return null;
   }
 
   const localEvents = readLocalDb();
