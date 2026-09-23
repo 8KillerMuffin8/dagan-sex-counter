@@ -7,12 +7,21 @@ interface SendMessageResponse {
 
 export function formatChatId(input: string): string {
   const cleaned = input.trim();
-  // If already a formatted chatId (individual or group)
-  if (cleaned.endsWith("@c.us") || cleaned.endsWith("@g.us")) {
+  // If already a formatted chatId (individual or group or lid)
+  if (
+    cleaned.endsWith("@c.us") ||
+    cleaned.endsWith("@g.us") ||
+    cleaned.endsWith("@lid")
+  ) {
     return cleaned;
   }
 
-  // Strip non-digits
+  // Check if it's a WhatsApp group ID (modern starts with 120, or legacy with hyphen)
+  if (cleaned.startsWith("120") || cleaned.includes("-")) {
+    return `${cleaned}@g.us`;
+  }
+
+  // Strip non-digits for personal phone numbers
   let digits = cleaned.replace(/\D/g, "");
 
   // Convert Israeli local format (e.g. 0501234567 -> 972501234567)
